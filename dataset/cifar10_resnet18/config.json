@@ -1,0 +1,6 @@
+{
+    "use_wandb": false,
+    "wandb_api_key": "your_key",
+    "dataset_root": "/home/ubuntu/Desktop/study/RPG-DNNWG/Dataset",
+    "model_zoo_root": "/home/ubuntu/Desktop/study/RPG-DNNWG/Model_Zoo"
+}

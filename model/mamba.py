@@ -22,7 +22,21 @@ class MambaModel(nn.Module):
         else:  # fixed positional embedding
             self.register_buffer("pe", pe)
 
+# in model/mamba.py -> class MambaModel
+
     def forward(self, output_shape, condition=None):
-        assert len(condition.shape) == 3
-        x = self.mamba_forward(self.pe.repeat(output_shape[0], 1, 1) + condition)
+        # ... (我们之前添加的 print 语句可以保留或删除) ...
+        
+        # --- 在这里加入这三行调试代码 ---
+        # print(f"[DEBUG MambaModel] self.pe device: {self.pe.device}")
+        # print(f"[DEBUG MambaModel] Input condition device: {condition.device}")
+        
+        device = next(self.mamba_forward.parameters()).device
+        pe_on_device = self.pe.to(device)
+        condition_on_device = condition.to(device)
+        combined_input = pe_on_device.repeat(output_shape[0], 1, 1) + condition_on_device
+
+        # print(f"[DEBUG MambaModel] Final 'combined_input' device before mamba_forward: {combined_input.device}")
+        
+        x = self.mamba_forward(combined_input)
         return x

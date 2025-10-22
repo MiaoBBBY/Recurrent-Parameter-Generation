@@ -30,30 +30,21 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # load additional config
+# load additional config
 import json
 config_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config.json")
 with open(config_file, "r") as f:
     additional_config = json.load(f)
 
-
-
-
 # config
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 config = {
     "dataset_root": "from_additional_config",
-    "batch_size": 500 if __name__ == "__main__" else 200,
-    "num_workers": 32,
-    "learning_rate": 1e-2,
-    "weight_decay": 0.001,
-    "epochs": 50,
-    "save_learning_rate": 1e-5,
-    "total_save_number": 50,
-    "tag": os.path.basename(os.path.dirname(__file__)),
+    "batch_size": 500, "num_workers": 32, "learning_rate": 1e-2,
+    "weight_decay": 0.001, "epochs": 50, "save_learning_rate": 1e-5,
+    "total_save_number": 50, "tag": os.path.basename(os.path.dirname(__file__)),
 }
 config.update(additional_config)
-
-
 
 
 # Data
@@ -99,21 +90,20 @@ test_loader = DataLoader(
 )
 
 # Model
-model, head = Model()
+# --- 【核心修改】 ---
+# 在调用 Model() 时，传入 num_classes 参数
+num_classes = 10 
+model, head = Model(num_classes=num_classes)
+# --------------------
 model = model.to(device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(
-    model.parameters(),
-    lr=config["learning_rate"],
-    weight_decay=config["weight_decay"],
-    momentum=0.9,
+    model.parameters(), lr=config["learning_rate"],
+    weight_decay=config["weight_decay"], momentum=0.9,
 )
 scheduler = lr_scheduler.CosineAnnealingLR(
-    optimizer,
-    T_max=config["epochs"],
-    eta_min=config["save_learning_rate"],
-)
-
+    optimizer, T_max=config["epochs"], eta_min=config["save_learning_rate"],
+)   
 
 
 

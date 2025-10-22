@@ -9,6 +9,97 @@ from .lstm import LstmModel
 from .gatemlp import GMLPModel
 
 
+import torch
+from abc import ABC
+from torch import nn
+from torch.nn import functional as F
+from .diffusion import DiffusionLoss, DDIMSampler, DDPMSampler
+from .transformer import TransformerModel
+from .mamba import MambaModel
+from .lstm import LstmModel
+from .gatemlp import GMLPModel
+
+# --- 1. 新增：通用的实例化工具函数 ---
+import importlib
+
+def instantiate_from_config(config):
+    """根据配置动态实例化一个类"""
+    if not "target" in config:
+        raise KeyError("Expected key 'target' to instantiate.")
+    module_path, class_name = config["target"].rsplit(".", 1)
+    module = importlib.import_module(module_path, package=__name__)
+    class_ = getattr(module, class_name)
+    return class_(**config.get("params", dict()))
+
+
+# --- 2. 新增：适配 Mamba 的 EmbedData 条件编码器 ---
+# (为了方便，我们暂时将这个类放在这里，您可以之后将其移动到自己的文件中)
+from .set_transformer.models import SetTransformer
+
+class EmbedData(nn.Module):
+    def __init__(self, enconfig, deconfig, d_model, ckpt_path=None, **kwargs):
+        super(EmbedData, self).__init__()
+        self.ckpt_path = ckpt_path
+        self.d_model = d_model
+
+        # 1. intra 使用原始的 enconfig, 它的输入是 768 维的 CLIP 特征
+        self.intra = SetTransformer(enconfig, deconfig)
+
+        # 2. 为 inter 创建一个新的 enconfig
+        #    它的输入维度必须是 intra 的输出维度, 即 deconfig['dim_output'] (512)
+        inter_enconfig = enconfig.copy() # 复制一份，避免修改原始字典
+        inter_enconfig['dim_input'] = deconfig['dim_output'] 
+        
+        # 3. inter 使用新的、正确的 inter_enconfig
+        self.inter = SetTransformer(inter_enconfig, deconfig)
+        
+        self.proj = nn.Linear(512, self.d_model)
+
+        if ckpt_path is not None:
+            self.init_from_ckpt(ckpt_path)
+            for param in self.intra.parameters():
+                param.requires_grad = False
+            for param in self.inter.parameters():
+                param.requires_grad = False
+
+    def init_from_ckpt(self, path):
+        sd = torch.load(path, map_location="cpu",weights_only=True)
+        if "state_dict" in list(sd.keys()):
+            sd = sd["state_dict"]
+        
+        # 仅加载与当前模型匹配的键
+        model_sd = self.state_dict()
+        filtered_sd = {k: v for k, v in sd.items() if k in model_sd and v.shape == model_sd[k].shape}
+        
+        self.load_state_dict(filtered_sd, strict=False)
+        print(f"Restored EmbedData from {path}")
+
+    def forward(self, inputs, sequence_length):
+        outputs = []
+        for x in inputs:
+            if isinstance(x, list) and len(x) == 1:
+                x = x[0]
+
+            x = x.to(next(self.parameters()).device)
+            z = self.intra(x).squeeze(1)
+            z = z.unsqueeze(0)
+            out = self.inter(z).reshape(-1)
+            outputs.append(out)
+        
+        outputs = torch.stack(outputs, 0).reshape(-1, 512)
+        
+        # 投影到 d_model 维度
+        c = self.proj(outputs) # -> 输出形状 (batch_size, d_model)
+
+        # 通过 unsqueeze 和 repeat 适配 Mamba 的输入形状
+        c = c.unsqueeze(1) # -> (batch_size, 1, d_model)
+        c = c.repeat(1, sequence_length, 1) # -> (batch_size, sequence_length, d_model)
+        
+        return c
+
+# ------------------------------------------------------------
+# ------------------------------------------------------------  
+# ------------------------------------------------------------          
 
 
 class ModelDiffusion(nn.Module, ABC):
@@ -226,3 +317,50 @@ class ClassConditionMambaDiffusionFull(MambaDiffusion):
 
     def _zero_condition(self, x):
         return torch.zeros(size=(x.shape[0], self.sequence_length, self.config["d_model"]), device=x.device)
+# ------------------------------------------------------------
+# ------------------------------------------------------------          
+
+class DatasetConditionMambaDiffusion(MambaDiffusion):
+    def __init__(self, sequence_length, positional_embedding, cond_stage_config, cond_stage_trainable=False):
+        super().__init__(sequence_length, positional_embedding)
+        
+        print("==> Initializing Dataset-Conditioned Mamba Diffusion...")
+        
+        # 动态地将主模型的 d_model 传递给条件模块的配置
+        cond_stage_config['params']['d_model'] = self.config["d_model"]
+        
+        # 实例化我们的数据集编码器 (EmbedData)
+        self.cond_stage_model = instantiate_from_config(cond_stage_config)
+
+        # 根据需要冻结条件编码器
+        if not cond_stage_trainable:
+            print("==> Freezing conditioning stage model.")
+            self.cond_stage_model.eval()
+            for param in self.cond_stage_model.parameters():
+                param.requires_grad = False
+                
+        # 移除父类中简单的 to_condition 线性层，因为它将被我们的 cond_stage_model 完全取代
+        if hasattr(self, 'to_condition'):
+            del self.to_condition
+
+    def forward(self, output_shape=None, x_0=None, condition=None, **kwargs):
+        # 注意：这里的 'condition' 输入现在是数据集特征 (dataset_features)
+        
+        # 1. 使用 EmbedData 将数据集特征编码为 Mamba 兼容的条件张量 c
+        #    形状: (batch_size, sequence_length, d_model)
+        # print(f"[DEBUG DatasetConditionMambaDiffusion] Input condition device: {condition.device}")
+        c = self.cond_stage_model(condition, self.sequence_length)
+        # print(f"[DEBUG DatasetConditionMambaDiffusion] Output 'c' from EmbedData device: {c.device}")
+
+        # 2. 调用父类的 forward 方法，但只传递我们精心准备的 c
+        #    permutation_state 被忽略
+        #    父类的 to_condition 不再被调用
+        
+        # --- 直接调用父类逻辑的核心部分 ---
+        if kwargs.get("sample"):
+            return self.sample(x=None, condition=c) # 直接将c用于采样
+        else:
+            # 训练时，直接将 c 传递给主干模型
+            generated_c = self.model(output_shape, c)
+            loss = self.criteria(x=x_0, c=generated_c, **kwargs)
+            return loss

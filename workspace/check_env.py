@@ -1,4 +1,4 @@
-import sys, os, json, argparse
+import sys, os, json
 root = os.sep + os.sep.join(__file__.split(os.sep)[1:__file__.split(os.sep).index("Recurrent-Parameter-Generation")+1])
 sys.path.append(root)
 os.chdir(root)
@@ -6,16 +6,9 @@ with open("./workspace/config.json", "r") as f:
     additional_config = json.load(f)
 USE_WANDB = additional_config["use_wandb"]
 
-
-parser = argparse.ArgumentParser(description='Conditional RPG Trainer for a specific architecture')
-parser.add_argument('--arch_tag', type=str, required=True, 
-                    help='The specific architecture tag to train on (e.g., cifar10_resnet18, cifar10_cnnsmall)')
-args = parser.parse_args()
-
-from tqdm.auto import tqdm # 引入 tqdm
-
-
-import time
+from accelerate import Accelerator
+accelerator = Accelerator()
+print(f"--- 00000000000000000000000000000000000000Manually moved optimizer to device: {accelerator.device} ---")
 
 # set global seed
 import random
@@ -31,7 +24,7 @@ torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 np.random.seed(seed)
 random.seed(seed)
-import torch.multiprocessing as mp
+
 # other
 import warnings
 from _thread import start_new_thread
@@ -40,36 +33,29 @@ if USE_WANDB: import wandb
 # torch
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from accelerate import Accelerator
+
+
 # --- MODIFIED: 导入我们所有的新模块 ---
 from dataset.model_zoo_dataset import ModelZooDataset as Dataset 
 from model import DatasetConditionMambaDiffusion as Model
 from torch.utils.data import DataLoader
 from model.diffusion import DDPMSampler, DDIMSampler
-# --- NEW: 集中化的测试配置 ---
-# 这个字典是新测试逻辑的核心，请确保'test_script'路径正确
-TEST_CONFIG = {
+EST_CONFIG = {
     'cifar10_resnet18': {
         'test_script': './dataset/cifar10_resnet18/test.py',
         'model_arch': 'resnet18', # 用于在测试时创建参考模型
         'num_classes': 10,
         'dataset_name': 'CIFAR10' # 用于从ModelZooDataset获取条件特征
     },
-    # 'cifar100_resnet18': {
-    #     'test_script': './dataset/cifar100_resnet18bn/test.py', # 确保路径正确
-    #     'model_arch': 'resnet18',
-    #     'num_classes': 100,
-    #     'dataset_name': 'CIFAR100'
-    # },
+    'cifar100_resnet18': {
+        'test_script': './dataset/cifar100_resnet18bn/test.py', # 确保路径正确
+        'model_arch': 'resnet18',
+        'num_classes': 100,
+        'dataset_name': 'CIFAR100'
+    },
     'svhn_resnet18': {
         'test_script': './dataset/cifar10_resnet18/test.py', # SVHN是10分类, 可复用cifar10的测试脚本
         'model_arch': 'resnet18',
-        'num_classes': 10,
-        'dataset_name': 'SVHN'
-    },
-    'cifar10_cnnsmall': { # <--- 新增 cnnsmall 的测试配置
-        'test_script': './dataset/cifar10_cnnsmall/test.py',
-        'model_arch': 'custom:./dataset/cifar10_cnnsmall/model.py', # 明确为自定义模型
         'num_classes': 10,
         'dataset_name': 'SVHN'
     },
@@ -84,7 +70,6 @@ config = {
         "model_zoo_root": additional_config["model_zoo_root"],
         "dataset_root": additional_config["dataset_root"],
         "dim_per_token": 2048,
-        "arch_tag": args.arch_tag, # <--- 关键：将命令行参数传入数据集
         "num_classes_per_set": 10,
         "num_samples_per_class": 5,
         "clip_model_name": "openai/clip-vit-base-patch32",
@@ -103,13 +88,13 @@ config = {
 
 
     # --- 训练设置 ---
-    "batch_size": 3, # 由于CLIP和SetTransformer会增加内存消耗，建议减小batch size
-    "num_workers": 8,
-    "total_steps": 10000,
+    "batch_size": 4, # 由于CLIP和SetTransformer会增加内存消耗，建议减小batch size
+    "num_workers": 1,
+    "total_steps": 80000,
     "learning_rate": 0.00003,
     "weight_decay": 0.0,
-    "save_every": 1000, # 增加保存和测试的频率
-    "print_every": 1,
+    "save_every": 80000 // 20, # 增加保存和测试的频率
+    "print_every": 50,
     "checkpoint_save_path": "./checkpoint",
 
     # --- 模型设置 (MambaDiffusion) ---
@@ -132,23 +117,22 @@ config = {
         
         "forward_once": True,
     },
-    "tag": f"rpg_generator_for_{args.arch_tag}", # <--- 关键：保存的模型会以架构名区分
+    "tag": "conditional_rpg_cifar_zoo",
 }
+print(f"--- 11111111111111111111111111111111111111Manually moved optimizer to device: {accelerator.device} ---")
 
 # --- MODIFIED: 数据加载 ---
-print(f"==> Preparing data EXCLUSIVELY for architecture: {args.arch_tag}")
-accelerator = Accelerator(cpu=False)
-config["dataset_params"]["device"] = accelerator.device 
-train_set = Dataset(**config["dataset_params"])
-
-
+print('==> Preparing data from Model Zoo...')
+train_set = config["dataset"](**config["dataset_params"])
 config["sequence_length"] = train_set.sequence_length
 print(f"Sequence length from dataset: {config['sequence_length']}")
+print(f"--- 22222222222222222222222222222222222222Manually moved optimizer to device: {accelerator.device} ---")
 
 train_loader = DataLoader(
     dataset=train_set, batch_size=config["batch_size"], num_workers=config["num_workers"],
-    persistent_workers=True, drop_last=True, shuffle=True
+    persistent_workers=False, drop_last=True, shuffle=True
 )
+print(f"--- 33333333333333333333333333333333333333Manually moved optimizer to device: {accelerator.device} ---")
 
 # --- MODIFIED: 模型实例化 ---
 print('==> Building Dataset-Conditioned model..')
@@ -164,107 +148,77 @@ model = Model(
 # --- Optimizer, Scheduler, Accelerator 设置 (保持不变) ---
 optimizer = optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config.get("weight_decay", 0.0))
 scheduler = CosineAnnealingLR(optimizer, T_max=config["total_steps"])
-accelerator = Accelerator()
+print(f"--- 44444444444444444444444444444444444444Manually moved optimizer to device: {accelerator.device} ---")
 model, optimizer, train_loader = accelerator.prepare(model, optimizer, train_loader)
 
+
+model.to(accelerator.device)
+print(f"--- Manually moved model to device: {accelerator.device} ---")
 # ... (Wandb 设置保持不变) ...
 
 # --- MODIFIED: 训练循环 ---
 def train():
-    print(f"==> Start conditional training for {config['total_steps']} steps on device: {accelerator.device}")
+    print("==> Start conditional training..")
     model.train()
-    
-    # 初始化计时和进度条
     current_step = 0
     done = False
-    train_start_time = time.time()
-    estimation_printed = False
-    
-    # 只在主进程创建进度条
-    if accelerator.is_main_process:
-        pbar = tqdm(total=config["total_steps"], desc="Training")
-
+    # while not done:
     while not done:
         for batch_idx, (param, dataset_features) in enumerate(train_loader):
-            param = param.to(accelerator.device)
-            dataset_features = dataset_features.to(accelerator.device)
-            
+            # --- 新增：在调用模型前，显式地将所有数据移动到GPU ---
+            device = accelerator.device
+            param = param.to(device)
+            dataset_features = dataset_features.to(device)
+            # --- 修改结束 ---
+            # print(f"\n[DEBUG train.py] param device: {param.device}, dataset_features device: {dataset_features.device}")
+
             optimizer.zero_grad()
             with accelerator.autocast():
+                # 现在传入的 param 和 dataset_features 都已确保在GPU上
                 loss = model(output_shape=param.shape, x_0=param, condition=dataset_features)
             accelerator.backward(loss)
-            
-            # 在 optimizer.step() 之前执行梯度裁剪（可选，但通常是好习惯）
-            # accelerator.clip_grad_norm_(model.parameters(), 1.0)
-            
             optimizer.step()
             scheduler.step(current_step)
             
-            current_step += 1
-            
             if accelerator.is_main_process:
-                # 更新进度条并显示损失
-                pbar.update(1)
-                pbar.set_postfix(loss=f"{loss.item():.4f}")
-
-                # --- 新增：在训练初期预测总时长 ---
-                if not estimation_printed and current_step > 20: # 使用20步的平均时间来预测，更稳定
-                    elapsed_time = time.time() - train_start_time
-                    avg_step_time = elapsed_time / current_step
-                    estimated_total_seconds = avg_step_time * config["total_steps"]
-                    
-                    # 格式化时间输出
-                    h = int(estimated_total_seconds // 3600)
-                    m = int((estimated_total_seconds % 3600) // 60)
-                    s = int(estimated_total_seconds % 60)
-                    
-                    print(f"\n[Initial Estimation] Average step time: {avg_step_time:.2f}s. "
-                          f"Estimated total training time: {h}h {m}m {s}s")
-                    estimation_printed = True
-                
-                # 定期保存和评估 (逻辑不变)
+                if current_step % config["print_every"] == 0:
+                    print(f"Step {current_step}, Loss: {loss.item()}")
+                # 定期保存和评估
                 if current_step > 0 and current_step % config["save_every"] == 0:
-                    test_current_task()
-                    # 切换回训练模式
-                    model.train()
-                    # 保存主模型检查点
-                    print("\nSaving main model checkpoint...")
+                    print("\nSaving checkpoint and running evaluation...")
+                    save_dir = config["checkpoint_save_path"]
+                    os.makedirs(save_dir, exist_ok=True)
                     unwrapped_model_state = accelerator.unwrap_model(model).state_dict()
                     save_path = os.path.join(config["checkpoint_save_path"], f"{config['tag']}_step_{current_step}.pth")
                     torch.save(unwrapped_model_state, save_path)
                     print(f"Saved main model to {save_path}")
-
+                    test_all_tasks() # 调用新的测试函数
+            current_step += 1
             if current_step >= config["total_steps"]:
                 done = True
                 break
-    
-    # 关闭进度条
-    if accelerator.is_main_process:
-        pbar.close()
-
 
 # --- NEW: 全新的生成和测试函数 ---
-# in train.py
-
 def generate_and_test(task_tag):
     print(f"\n==> Generating and Testing for task: {task_tag}")
-    unwrapped_model = accelerator.unwrap_model(model)
-    unwrapped_model.eval()
+    model.eval()
     
     task_info = TEST_CONFIG.get(task_tag)
     if not task_info:
-        print(f"Warning: Task '{task_tag}' not found. Skipping.")
+        print(f"Warning: Task '{task_tag}' not found in TEST_CONFIG. Skipping test.")
         return
 
     print("==> Preparing condition features...")
-    condition_features = train_set.get_features_for_task(task_info['dataset_name']).unsqueeze(0).to(accelerator.device)
+    condition_features = train_set.get_features_for_task(task_info['dataset_name']).unsqueeze(0)
     
     print("==> Generating weights...")
     with torch.no_grad():
+        unwrapped_model = accelerator.unwrap_model(model)
         prediction_chunked = unwrapped_model(sample=True, condition=condition_features)
     
     print("==> Post-processing weights to state_dict...")
-    train_set.structure = train_set.structures[task_tag]
+    # 关键: 复用 train_set 的 postprocess 方法来反归一化和反分块
+    train_set.structure = train_set.structures[task_tag] # 设置正确的structure
     generated_state_dict = train_set.postprocess(prediction_chunked)
 
     save_dir = "./generated_weights"
@@ -273,55 +227,30 @@ def generate_and_test(task_tag):
     torch.save(generated_state_dict, save_path)
     print(f"==> Saved generated state_dict to {save_path}")
 
-    # --- 【最终修正】构建并执行调用 evaluate.py 的新命令 ---
-    test_command = (
-        f"python evaluate.py "
-        f"--model_arch \"{task_info['model_arch']}\" "
-        f"--num_classes {task_info['num_classes']} "
-        f"--weights_path {save_path} "
-        f"--dataset {task_info['dataset_name']} "
-        f"--dataset_root {config['dataset_params']['dataset_root']}"
-    )
-    print(f"==> Executing universal evaluation command: {test_command}")
-    os.system(test_command)
+    test_script_path = task_info['test_script']
+    if os.path.exists(test_script_path):
+        test_command = f"python {test_script_path} {save_path}"
+        print(f"==> Executing test command: {test_command}")
+        os.system(test_command)
+    else:
+        print(f"Warning: Test script not found at {test_script_path}. Skipping execution.")
     
-    unwrapped_model.train()
+    model.train() # 恢复训练模式
 
-def test_current_task():
+def test_all_tasks():
     print("\n\n========================================================")
-    print(f"      STARTING EVALUATION FOR CURRENT ARCH: {args.arch_tag}      ")
+    print("      STARTING EVALUATION ON ALL CONFIGURED TASKS      ")
     print("========================================================")
-    # generate_and_test 现在只接收我们正在训练的 arch_tag
-    generate_and_test(args.arch_tag)
+    for task_tag in TEST_CONFIG.keys():
+        generate_and_test(task_tag)
 
-
+# --- MODIFIED: 主执行逻辑 ---
 if __name__ == '__main__':
-    # --- 【最终修正】在所有操作之前，设置多进程启动方法 ---
-    try:
-        mp.set_start_method('spawn', force=True)
-        print("--- Multiprocessing start method set to 'spawn'. ---")
-    except RuntimeError:
-        pass
-    # --- 修改结束 ---
-
-    print("\nStarting main training process...")
-    overall_start_time = time.time()
-
     train() # 执行完整的训练
     
-    overall_end_time = time.time()
-    duration = overall_end_time - overall_start_time
-    hours = int(duration // 3600)
-    minutes = int((duration % 3600) // 60)
-    seconds = int(duration % 60)
-    print("\n" + "="*50)
-    print(f"Total Training Time: {hours}h {minutes}m {seconds}s")
-    print("="*50)
-    # --- 修改结束 ---
-
     if accelerator.is_main_process:
-        print(f"\nFinal evaluation for {args.arch_tag} after training completion...")
-        test_current_task() # <--- 只测试我们刚刚训练的架构
+        print("\nFinal evaluation after training completion...")
+        test_all_tasks() # 训练结束后，对所有已定义的任务进行最终的生成和测试
 
     print("Finished All Processes!")
     exit(0)
